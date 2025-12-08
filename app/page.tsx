@@ -42,7 +42,7 @@ export default function Home() {
     initializeApp();
 
     // Listen for auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    const { data: { subscription: authSubscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
       const newUser = session?.user ?? null;
       setUser(newUser);
       
@@ -54,8 +54,87 @@ export default function Home() {
       }
     });
 
-    return () => subscription.unsubscribe();
+    return () => authSubscription.unsubscribe();
   }, []);
+
+  /**
+   * Realtime 订阅：监听 todos 表的变化
+   * 当其他设备或用户操作时，实时更新本地数据
+   */
+  useEffect(() => {
+    if (!user) return;
+
+    console.log('🔴 Setting up Realtime subscription for user:', user.id);
+
+    // 订阅 todos 表的变化，只监听当前用户的数据
+    const channel = supabase
+      .channel('todos-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*', // 监听所有事件：INSERT, UPDATE, DELETE
+          schema: 'public',
+          table: 'todos',
+          filter: `user_id=eq.${user.id}` // 只监听当前用户的数据
+        },
+        (payload) => {
+          console.log('📡 Realtime event received:', payload);
+          handleRealtimeEvent(payload);
+        }
+      )
+      .subscribe((status) => {
+        console.log('🔴 Realtime subscription status:', status);
+      });
+
+    // 清理订阅
+    return () => {
+      console.log('🔴 Cleaning up Realtime subscription');
+      supabase.removeChannel(channel);
+    };
+  }, [user]);
+
+  /**
+   * 处理 Realtime 事件
+   */
+  const handleRealtimeEvent = (payload: any) => {
+    const { eventType, new: newRecord, old: oldRecord } = payload;
+
+    switch (eventType) {
+      case 'INSERT':
+        // 新增 todo
+        console.log('➕ INSERT event:', newRecord);
+        setTodos((current) => {
+          // 检查是否已存在（避免重复）
+          if (current.some(todo => todo.id === newRecord.id)) {
+            return current;
+          }
+          // 添加到列表顶部
+          return [newRecord as Todo, ...current];
+        });
+        break;
+
+      case 'UPDATE':
+        // 更新 todo
+        console.log('✏️ UPDATE event:', newRecord);
+        setTodos((current) =>
+          current.map((todo) =>
+            todo.id === newRecord.id ? (newRecord as Todo) : todo
+          )
+        );
+        break;
+
+      case 'DELETE':
+        // 删除 todo
+        console.log('🗑️ DELETE event:', oldRecord);
+        setTodos((current) =>
+          current.filter((todo) => todo.id !== oldRecord.id)
+        );
+        break;
+
+      default:
+        console.warn('Unknown event type:', eventType);
+    }
+  };
 
   /**
    * 获取当前用户的所有 todos
@@ -190,8 +269,14 @@ export default function Home() {
       }
       
       if (data) {
-        // 乐观更新 UI
-        setTodos([data, ...todos]);
+        // 乐观更新 UI（Realtime 会再次触发，但会被去重）
+        setTodos((current) => {
+          // 检查是否已存在
+          if (current.some(todo => todo.id === data.id)) {
+            return current;
+          }
+          return [data, ...current];
+        });
         setNewTodo('');
         clearSelectedImage();
       }
@@ -207,6 +292,7 @@ export default function Home() {
   /**
    * 切换 todo 的完成状态
    * RLS 策略确保只能更新当前用户的 todo
+   * Realtime 会自动同步更新到其他设备
    */
   const toggleTodo = async (id: string, completed: boolean) => {
     if (!user) {
@@ -216,8 +302,10 @@ export default function Home() {
 
     // 乐观更新 UI
     const newCompleted = !completed;
-    setTodos(
-      todos.map((todo) =>
+    const previousTodos = [...todos];
+    
+    setTodos((current) =>
+      current.map((todo) =>
         todo.id === id ? { ...todo, completed: newCompleted } : todo
       )
     );
@@ -226,6 +314,7 @@ export default function Home() {
       setError(null);
       
       // 更新数据库，RLS 会确保只能更新自己的 todo
+      // Realtime 会自动触发 UPDATE 事件，但因为我们已经乐观更新，不会产生视觉闪烁
       const { error } = await supabase
         .from('todos')
         .update({ completed: newCompleted })
@@ -241,17 +330,14 @@ export default function Home() {
       setError('更新失败，请重试');
       
       // 回滚 UI 更新
-      setTodos(
-        todos.map((todo) =>
-          todo.id === id ? { ...todo, completed } : todo
-        )
-      );
+      setTodos(previousTodos);
     }
   };
 
   /**
    * 删除 todo（包含删除关联的图片）
    * RLS 策略确保只能删除当前用户的 todo
+   * Realtime 会自动同步删除到其他设备
    */
   const deleteTodo = async (id: string) => {
     if (!user) {
@@ -260,11 +346,11 @@ export default function Home() {
     }
 
     // 保存原始数据以便回滚
-    const originalTodos = [...todos];
+    const previousTodos = [...todos];
     const todoToDelete = todos.find(t => t.id === id);
     
     // 乐观更新 UI
-    setTodos(todos.filter((todo) => todo.id !== id));
+    setTodos((current) => current.filter((todo) => todo.id !== id));
 
     try {
       setError(null);
@@ -275,6 +361,7 @@ export default function Home() {
       }
       
       // 删除数据库记录，RLS 会确保只能删除自己的 todo
+      // Realtime 会自动触发 DELETE 事件
       const { error } = await supabase
         .from('todos')
         .delete()
@@ -290,7 +377,7 @@ export default function Home() {
       setError('删除失败，请重试');
       
       // 回滚 UI 更新
-      setTodos(originalTodos);
+      setTodos(previousTodos);
     }
   };
 
