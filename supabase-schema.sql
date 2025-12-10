@@ -29,7 +29,7 @@ COMMENT ON COLUMN todos.id IS '待办事项唯一标识';
 COMMENT ON COLUMN todos.user_id IS '所属用户ID，关联到 auth.users';
 COMMENT ON COLUMN todos.text IS '待办事项内容，最多500字符';
 COMMENT ON COLUMN todos.completed IS '是否已完成';
-COMMENT ON COLUMN todos.image_url IS '图片附件URL，存储在 my-todo bucket 中';
+COMMENT ON COLUMN todos.image_url IS '附件图片的预览地址';
 COMMENT ON COLUMN todos.created_at IS '创建时间';
 COMMENT ON COLUMN todos.updated_at IS '最后更新时间';
 
@@ -107,10 +107,3 @@ CREATE TRIGGER update_todos_updated_at
 
 -- 查看所有策略
 -- SELECT * FROM pg_policies WHERE tablename = 'todos';
-
--- ============================================
--- 添加 image_url 字段到已存在的表（如果表已创建）
--- ============================================
--- 如果表已经存在，运行以下语句添加字段：
--- ALTER TABLE todos ADD COLUMN IF NOT EXISTS image_url TEXT;
--- COMMENT ON COLUMN todos.image_url IS '图片附件URL，存储在 my-todo bucket 中';

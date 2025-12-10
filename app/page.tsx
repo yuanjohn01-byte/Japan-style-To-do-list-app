@@ -2,10 +2,10 @@
 
 import { useEffect, useState } from 'react';
 import { supabase, type Todo } from '@/lib/supabase';
-import { Plus, Circle, CheckCircle2, X, Loader2, AlertCircle, Image as ImageIcon, Trash2 } from 'lucide-react';
+import { Plus, Circle, CheckCircle2, X, Loader2, AlertCircle, Image as ImageIcon, Upload } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import type { User } from '@supabase/supabase-js';
-import { uploadTodoImage, deleteTodoImage } from '@/lib/supabase/storage';
+import { uploadTodoImage, deleteTodoImage, replaceTodoImage } from '@/lib/supabase/storage';
 
 export default function Home() {
   const [todos, setTodos] = useState<Todo[]>([]);
@@ -16,7 +16,7 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [selectedImage, setSelectedImage] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [uploadingImage, setUploadingImage] = useState(false);
+  const [uploadingImage, setUploadingImage] = useState<string | null>(null); // todo id that is uploading
   const router = useRouter();
 
   useEffect(() => {
@@ -42,7 +42,7 @@ export default function Home() {
     initializeApp();
 
     // Listen for auth changes
-    const { data: { subscription: authSubscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
       const newUser = session?.user ?? null;
       setUser(newUser);
       
@@ -54,87 +54,8 @@ export default function Home() {
       }
     });
 
-    return () => authSubscription.unsubscribe();
+    return () => subscription.unsubscribe();
   }, []);
-
-  /**
-   * Realtime 订阅：监听 todos 表的变化
-   * 当其他设备或用户操作时，实时更新本地数据
-   */
-  useEffect(() => {
-    if (!user) return;
-
-    console.log('🔴 Setting up Realtime subscription for user:', user.id);
-
-    // 订阅 todos 表的变化，只监听当前用户的数据
-    const channel = supabase
-      .channel('todos-changes')
-      .on(
-        'postgres_changes',
-        {
-          event: '*', // 监听所有事件：INSERT, UPDATE, DELETE
-          schema: 'public',
-          table: 'todos',
-          filter: `user_id=eq.${user.id}` // 只监听当前用户的数据
-        },
-        (payload) => {
-          console.log('📡 Realtime event received:', payload);
-          handleRealtimeEvent(payload);
-        }
-      )
-      .subscribe((status) => {
-        console.log('🔴 Realtime subscription status:', status);
-      });
-
-    // 清理订阅
-    return () => {
-      console.log('🔴 Cleaning up Realtime subscription');
-      supabase.removeChannel(channel);
-    };
-  }, [user]);
-
-  /**
-   * 处理 Realtime 事件
-   */
-  const handleRealtimeEvent = (payload: any) => {
-    const { eventType, new: newRecord, old: oldRecord } = payload;
-
-    switch (eventType) {
-      case 'INSERT':
-        // 新增 todo
-        console.log('➕ INSERT event:', newRecord);
-        setTodos((current) => {
-          // 检查是否已存在（避免重复）
-          if (current.some(todo => todo.id === newRecord.id)) {
-            return current;
-          }
-          // 添加到列表顶部
-          return [newRecord as Todo, ...current];
-        });
-        break;
-
-      case 'UPDATE':
-        // 更新 todo
-        console.log('✏️ UPDATE event:', newRecord);
-        setTodos((current) =>
-          current.map((todo) =>
-            todo.id === newRecord.id ? (newRecord as Todo) : todo
-          )
-        );
-        break;
-
-      case 'DELETE':
-        // 删除 todo
-        console.log('🗑️ DELETE event:', oldRecord);
-        setTodos((current) =>
-          current.filter((todo) => todo.id !== oldRecord.id)
-        );
-        break;
-
-      default:
-        console.warn('Unknown event type:', eventType);
-    }
-  };
 
   /**
    * 获取当前用户的所有 todos
@@ -174,45 +95,8 @@ export default function Home() {
   };
 
   /**
-   * 处理图片选择
-   */
-  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    // 验证文件类型
-    if (!file.type.startsWith('image/')) {
-      setError('只能上传图片文件');
-      return;
-    }
-
-    // 验证文件大小（5MB）
-    if (file.size > 5 * 1024 * 1024) {
-      setError('图片大小不能超过 5MB');
-      return;
-    }
-
-    setSelectedImage(file);
-    
-    // 创建预览
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      setImagePreview(reader.result as string);
-    };
-    reader.readAsDataURL(file);
-  };
-
-  /**
-   * 清除选中的图片
-   */
-  const clearSelectedImage = () => {
-    setSelectedImage(null);
-    setImagePreview(null);
-  };
-
-  /**
-   * 添加新的 todo（包含图片上传）
-   * 要求用户必须登录，并自动关联到当前用户
+   * 添加新的 todo - 通过 AI 解析
+   * 调用后端 API，使用 AI 解析文本中的待办事项
    */
   const addTodo = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -226,9 +110,9 @@ export default function Home() {
       return;
     }
 
-    // 验证文本长度（与数据库约束一致）
-    if (todoText.length > 500) {
-      setError('待办事项内容不能超过 500 字符');
+    // 验证文本长度
+    if (todoText.length > 2000) {
+      setError('文本内容过长，最多 2000 字符');
       return;
     }
 
@@ -236,63 +120,45 @@ export default function Home() {
     setError(null);
     
     try {
-      let imageUrl: string | null = null;
-
-      // 如果有选中的图片，先上传
-      if (selectedImage) {
-        setUploadingImage(true);
-        const { url, error: uploadError } = await uploadTodoImage(selectedImage, user.id);
-        
-        if (uploadError) {
-          throw new Error(uploadError);
-        }
-        
-        imageUrl = url;
-        setUploadingImage(false);
-      }
-
-      // 插入新的 todo，包含 user_id 和 image_url
-      const { data, error } = await supabase
-        .from('todos')
-        .insert([{ 
+      // 调用后端 API 解析待办事项
+      const response = await fetch('/api/parse-todos', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
           text: todoText,
-          user_id: user.id,
-          completed: false,
-          image_url: imageUrl
-        }])
-        .select()
-        .single();
+          userId: user.id,
+        }),
+      });
 
-      if (error) {
-        console.error('Supabase error:', error);
-        throw new Error(error.message);
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.error || '解析失败');
       }
-      
-      if (data) {
-        // 乐观更新 UI（Realtime 会再次触发，但会被去重）
-        setTodos((current) => {
-          // 检查是否已存在
-          if (current.some(todo => todo.id === data.id)) {
-            return current;
-          }
-          return [data, ...current];
-        });
+
+      if (result.success && result.todos) {
+        // 添加新的 todos 到列表顶部
+        setTodos([...result.todos, ...todos]);
         setNewTodo('');
-        clearSelectedImage();
+        
+        // 显示成功提示
+        if (result.count > 1) {
+          console.log(`✅ 成功添加 ${result.count} 条待办事项`);
+        }
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error adding todo:', err);
-      setError(err instanceof Error ? err.message : '添加失败，请重试');
+      setError(err.message || 'AI 解析失败，请重试');
     } finally {
       setAdding(false);
-      setUploadingImage(false);
     }
   };
 
   /**
    * 切换 todo 的完成状态
    * RLS 策略确保只能更新当前用户的 todo
-   * Realtime 会自动同步更新到其他设备
    */
   const toggleTodo = async (id: string, completed: boolean) => {
     if (!user) {
@@ -302,10 +168,8 @@ export default function Home() {
 
     // 乐观更新 UI
     const newCompleted = !completed;
-    const previousTodos = [...todos];
-    
-    setTodos((current) =>
-      current.map((todo) =>
+    setTodos(
+      todos.map((todo) =>
         todo.id === id ? { ...todo, completed: newCompleted } : todo
       )
     );
@@ -314,7 +178,6 @@ export default function Home() {
       setError(null);
       
       // 更新数据库，RLS 会确保只能更新自己的 todo
-      // Realtime 会自动触发 UPDATE 事件，但因为我们已经乐观更新，不会产生视觉闪烁
       const { error } = await supabase
         .from('todos')
         .update({ completed: newCompleted })
@@ -330,14 +193,17 @@ export default function Home() {
       setError('更新失败，请重试');
       
       // 回滚 UI 更新
-      setTodos(previousTodos);
+      setTodos(
+        todos.map((todo) =>
+          todo.id === id ? { ...todo, completed } : todo
+        )
+      );
     }
   };
 
   /**
-   * 删除 todo（包含删除关联的图片）
+   * 删除 todo
    * RLS 策略确保只能删除当前用户的 todo
-   * Realtime 会自动同步删除到其他设备
    */
   const deleteTodo = async (id: string) => {
     if (!user) {
@@ -346,22 +212,15 @@ export default function Home() {
     }
 
     // 保存原始数据以便回滚
-    const previousTodos = [...todos];
-    const todoToDelete = todos.find(t => t.id === id);
+    const originalTodos = [...todos];
     
     // 乐观更新 UI
-    setTodos((current) => current.filter((todo) => todo.id !== id));
+    setTodos(todos.filter((todo) => todo.id !== id));
 
     try {
       setError(null);
       
-      // 如果有图片，先删除图片
-      if (todoToDelete?.image_url) {
-        await deleteTodoImage(todoToDelete.image_url, user.id);
-      }
-      
       // 删除数据库记录，RLS 会确保只能删除自己的 todo
-      // Realtime 会自动触发 DELETE 事件
       const { error } = await supabase
         .from('todos')
         .delete()
@@ -377,7 +236,7 @@ export default function Home() {
       setError('删除失败，请重试');
       
       // 回滚 UI 更新
-      setTodos(previousTodos);
+      setTodos(originalTodos);
     }
   };
 
@@ -423,39 +282,25 @@ export default function Home() {
         )}
 
         <div className="bg-white/60 backdrop-blur-sm rounded-2xl shadow-xl shadow-stone-200/50 p-8 mb-6 border border-stone-200/50">
-          <form onSubmit={addTodo} className="space-y-4">
+          <form onSubmit={addTodo} className="space-y-3">
             <div className="flex gap-3">
-              <input
-                type="text"
+              <textarea
                 value={newTodo}
                 onChange={(e) => setNewTodo(e.target.value)}
-                placeholder="新しいことを書く..."
+                placeholder="描述你的待办事项，AI 会帮你智能解析...&#10;例如：明天要开会，写报告，还要给客户打电话"
                 disabled={adding}
+                rows={3}
                 className="flex-1 px-6 py-4 bg-stone-50/50 border border-stone-200 rounded-xl
                          focus:outline-none focus:ring-2 focus:ring-stone-300 focus:border-transparent
                          placeholder:text-stone-400 text-stone-700 font-light
-                         transition-all duration-300 disabled:opacity-50"
+                         transition-all duration-300 disabled:opacity-50 resize-none"
               />
-              
-              {/* 图片上传按钮 */}
-              <label className="px-6 py-4 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-xl
-                              transition-all duration-300 cursor-pointer flex items-center gap-2 shadow-sm">
-                <ImageIcon className="w-5 h-5" />
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={handleImageSelect}
-                  disabled={adding}
-                  className="hidden"
-                />
-              </label>
-
               <button
                 type="submit"
                 disabled={adding || !newTodo.trim()}
                 className="px-6 py-4 bg-stone-700 hover:bg-stone-800 text-stone-50 rounded-xl
                          transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed
-                         flex items-center gap-2 shadow-lg shadow-stone-300/50"
+                         flex items-center gap-2 shadow-lg shadow-stone-300/50 self-start"
               >
                 {adding ? (
                   <Loader2 className="w-5 h-5 animate-spin" />
@@ -464,30 +309,9 @@ export default function Home() {
                 )}
               </button>
             </div>
-
-            {/* 图片预览 */}
-            {imagePreview && (
-              <div className="relative inline-block">
-                <img
-                  src={imagePreview}
-                  alt="Preview"
-                  className="h-24 w-24 object-cover rounded-lg border-2 border-stone-200"
-                />
-                <button
-                  type="button"
-                  onClick={clearSelectedImage}
-                  disabled={adding}
-                  className="absolute -top-2 -right-2 bg-red-500 hover:bg-red-600 text-white rounded-full p-1 shadow-lg transition-all duration-200"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-                {uploadingImage && (
-                  <div className="absolute inset-0 bg-black/50 rounded-lg flex items-center justify-center">
-                    <Loader2 className="w-6 h-6 text-white animate-spin" />
-                  </div>
-                )}
-              </div>
-            )}
+            <p className="text-xs text-stone-400 font-light">
+              💡 支持批量添加：输入多个任务，AI 会自动识别并分别创建
+            </p>
           </form>
         </div>
 
@@ -526,10 +350,10 @@ export default function Home() {
                          animate-in fade-in slide-in-from-top-2"
                 style={{ animationDelay: `${index * 50}ms` }}
               >
-                <div className="flex items-start gap-4">
+                <div className="flex items-center gap-4">
                   <button
                     onClick={() => toggleTodo(todo.id, todo.completed)}
-                    className="flex-shrink-0 transition-all duration-300 hover:scale-110 mt-1"
+                    className="flex-shrink-0 transition-all duration-300 hover:scale-110"
                   >
                     {todo.completed ? (
                       <CheckCircle2 className="w-6 h-6 text-stone-600" />
@@ -538,30 +362,15 @@ export default function Home() {
                     )}
                   </button>
 
-                  <div className="flex-1 space-y-3">
-                    <span
-                      className={`font-light tracking-wide transition-all duration-300 block ${
-                        todo.completed
-                          ? 'text-stone-400 line-through'
-                          : 'text-stone-700'
-                      }`}
-                    >
-                      {todo.text}
-                    </span>
-
-                    {/* 图片附件 */}
-                    {todo.image_url && (
-                      <div className="relative inline-block group/image">
-                        <img
-                          src={todo.image_url}
-                          alt="Todo attachment"
-                          className="h-32 w-32 object-cover rounded-lg border-2 border-stone-200 cursor-pointer hover:border-stone-400 transition-all"
-                          onClick={() => window.open(todo.image_url!, '_blank')}
-                        />
-                        <div className="absolute inset-0 bg-black/0 hover:bg-black/10 rounded-lg transition-all duration-200" />
-                      </div>
-                    )}
-                  </div>
+                  <span
+                    className={`flex-1 font-light tracking-wide transition-all duration-300 ${
+                      todo.completed
+                        ? 'text-stone-400 line-through'
+                        : 'text-stone-700'
+                    }`}
+                  >
+                    {todo.text}
+                  </span>
 
                   <button
                     onClick={() => deleteTodo(todo.id)}
