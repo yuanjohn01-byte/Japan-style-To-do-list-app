@@ -23,7 +23,7 @@ const supabaseAdmin = createClient(
 export async function POST(request: NextRequest) {
   try {
     // 解析请求体
-    const { text, userId } = await request.json();
+    const { text, userId, imageUrl } = await request.json();
 
     // 验证输入
     if (!text || !userId) {
@@ -107,10 +107,12 @@ export async function POST(request: NextRequest) {
     console.log('✅ 解析出的待办事项:', parsedTodos.todos);
 
     // 准备插入数据库的数据
-    const todosToInsert = parsedTodos.todos.map((todoText) => ({
+    // 如果有图片，只附加到第一条 todo
+    const todosToInsert = parsedTodos.todos.map((todoText, index) => ({
       user_id: userId,
       text: todoText.substring(0, 500), // 限制长度
       completed: false,
+      image_url: index === 0 && imageUrl ? imageUrl : null, // 只有第一条带图片
     }));
 
     // 使用 Supabase Admin 客户端插入数据（绕过 RLS）

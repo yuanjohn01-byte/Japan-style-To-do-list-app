@@ -16,7 +16,6 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [selectedImage, setSelectedImage] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [uploadingImage, setUploadingImage] = useState<string | null>(null); // todo id that is uploading
   const router = useRouter();
 
   useEffect(() => {
@@ -95,6 +94,44 @@ export default function Home() {
   };
 
   /**
+   * 处理图片选择
+   */
+  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // 验证文件类型
+    if (!file.type.startsWith('image/')) {
+      setError('只能上传图片文件');
+      return;
+    }
+
+    // 验证文件大小（5MB）
+    const MAX_SIZE = 5 * 1024 * 1024;
+    if (file.size > MAX_SIZE) {
+      setError('图片大小不能超过 5MB');
+      return;
+    }
+
+    setSelectedImage(file);
+    
+    // 创建预览
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setImagePreview(reader.result as string);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  /**
+   * 清除选中的图片
+   */
+  const clearSelectedImage = () => {
+    setSelectedImage(null);
+    setImagePreview(null);
+  };
+
+  /**
    * 添加新的 todo - 通过 AI 解析
    * 调用后端 API，使用 AI 解析文本中的待办事项
    */
@@ -120,6 +157,16 @@ export default function Home() {
     setError(null);
     
     try {
+      // 如果有选中的图片，先上传
+      let imageUrl: string | null = null;
+      if (selectedImage && user) {
+        const uploadResult = await uploadTodoImage(selectedImage, user.id);
+        if (uploadResult.error) {
+          throw new Error(uploadResult.error);
+        }
+        imageUrl = uploadResult.url;
+      }
+
       // 调用后端 API 解析待办事项
       const response = await fetch('/api/parse-todos', {
         method: 'POST',
@@ -129,6 +176,7 @@ export default function Home() {
         body: JSON.stringify({
           text: todoText,
           userId: user.id,
+          imageUrl, // 传递图片 URL
         }),
       });
 
@@ -142,6 +190,7 @@ export default function Home() {
         // 添加新的 todos 到列表顶部
         setTodos([...result.todos, ...todos]);
         setNewTodo('');
+        clearSelectedImage(); // 清除图片选择
         
         // 显示成功提示
         if (result.count > 1) {
@@ -213,6 +262,7 @@ export default function Home() {
 
     // 保存原始数据以便回滚
     const originalTodos = [...todos];
+    const todoToDelete = todos.find(t => t.id === id);
     
     // 乐观更新 UI
     setTodos(todos.filter((todo) => todo.id !== id));
@@ -220,6 +270,11 @@ export default function Home() {
     try {
       setError(null);
       
+      // 如果有图片，先删除 storage 中的图片
+      if (todoToDelete?.image_url) {
+        await deleteTodoImage(todoToDelete.image_url, user.id);
+      }
+
       // 删除数据库记录，RLS 会确保只能删除自己的 todo
       const { error } = await supabase
         .from('todos')
@@ -282,7 +337,7 @@ export default function Home() {
         )}
 
         <div className="bg-white/60 backdrop-blur-sm rounded-2xl shadow-xl shadow-stone-200/50 p-8 mb-6 border border-stone-200/50">
-          <form onSubmit={addTodo} className="space-y-3">
+          <form onSubmit={addTodo} className="space-y-4">
             <div className="flex gap-3">
               <textarea
                 value={newTodo}
@@ -309,8 +364,46 @@ export default function Home() {
                 )}
               </button>
             </div>
+
+            {/* 图片上传区域 */}
+            <div className="space-y-3">
+              {imagePreview ? (
+                <div className="relative inline-block">
+                  <img
+                    src={imagePreview}
+                    alt="预览"
+                    className="h-32 w-auto rounded-lg border-2 border-stone-200 object-cover"
+                  />
+                  <button
+                    type="button"
+                    onClick={clearSelectedImage}
+                    disabled={adding}
+                    className="absolute -top-2 -right-2 p-1 bg-stone-700 hover:bg-stone-800 
+                             text-white rounded-full transition-all duration-300 
+                             disabled:opacity-50 shadow-lg"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              ) : (
+                <label className="inline-flex items-center gap-2 px-4 py-2 bg-stone-100 hover:bg-stone-200 
+                                text-stone-700 rounded-lg cursor-pointer transition-all duration-300
+                                border border-stone-300 hover:border-stone-400">
+                  <ImageIcon className="w-4 h-4" />
+                  <span className="text-sm font-light">添加图片附件</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handleImageSelect}
+                    disabled={adding}
+                    className="hidden"
+                  />
+                </label>
+              )}
+            </div>
+
             <p className="text-xs text-stone-400 font-light">
-              💡 支持批量添加：输入多个任务，AI 会自动识别并分别创建
+              💡 支持批量添加：输入多个任务，AI 会自动识别并分别创建（图片仅附加到第一条）
             </p>
           </form>
         </div>
@@ -350,10 +443,10 @@ export default function Home() {
                          animate-in fade-in slide-in-from-top-2"
                 style={{ animationDelay: `${index * 50}ms` }}
               >
-                <div className="flex items-center gap-4">
+                <div className="flex items-start gap-4">
                   <button
                     onClick={() => toggleTodo(todo.id, todo.completed)}
-                    className="flex-shrink-0 transition-all duration-300 hover:scale-110"
+                    className="flex-shrink-0 transition-all duration-300 hover:scale-110 mt-1"
                   >
                     {todo.completed ? (
                       <CheckCircle2 className="w-6 h-6 text-stone-600" />
@@ -362,21 +455,41 @@ export default function Home() {
                     )}
                   </button>
 
-                  <span
-                    className={`flex-1 font-light tracking-wide transition-all duration-300 ${
-                      todo.completed
-                        ? 'text-stone-400 line-through'
-                        : 'text-stone-700'
-                    }`}
-                  >
-                    {todo.text}
-                  </span>
+                  <div className="flex-1 space-y-3">
+                    <span
+                      className={`font-light tracking-wide transition-all duration-300 block ${
+                        todo.completed
+                          ? 'text-stone-400 line-through'
+                          : 'text-stone-700'
+                      }`}
+                    >
+                      {todo.text}
+                    </span>
+
+                    {/* 显示图片附件 */}
+                    {todo.image_url && (
+                      <div className="relative inline-block group/image">
+                        <img
+                          src={todo.image_url}
+                          alt="附件"
+                          className="h-24 w-auto rounded-lg border border-stone-200 object-cover
+                                   transition-all duration-300 hover:shadow-lg cursor-pointer"
+                          onClick={() => window.open(todo.image_url!, '_blank')}
+                        />
+                        <div className="absolute inset-0 bg-black/0 group-hover/image:bg-black/10 
+                                      rounded-lg transition-all duration-300 flex items-center justify-center">
+                          <ImageIcon className="w-6 h-6 text-white opacity-0 group-hover/image:opacity-100 
+                                               transition-opacity duration-300" />
+                        </div>
+                      </div>
+                    )}
+                  </div>
 
                   <button
                     onClick={() => deleteTodo(todo.id)}
                     className="flex-shrink-0 opacity-0 group-hover:opacity-100
                              transition-all duration-300 hover:scale-110
-                             text-stone-400 hover:text-stone-600"
+                             text-stone-400 hover:text-stone-600 mt-1"
                   >
                     <X className="w-5 h-5" />
                   </button>
